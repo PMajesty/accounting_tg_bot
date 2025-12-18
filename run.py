@@ -4,16 +4,19 @@ import csv
 import io
 import os
 from datetime import datetime
+from dotenv import load_dotenv
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import ApplicationBuilder, ContextTypes, CommandHandler, MessageHandler, CallbackQueryHandler, filters
 
-TOKEN = "8430205853:AAEAOq6HHPu7JzWhUDNAfB8XmEYD2iPkosw"
-ALLOWED_USER = "Artyom_dio"
+load_dotenv()
 
-DB_USER = "telegram_bot"
-DB_PASSWORD = "AppStr0ngPass!"
-DB_HOST = "localhost"
-DB_NAME = "telegram_ai_bot"
+TOKEN = os.getenv("TOKEN")
+ALLOWED_USER = os.getenv("ALLOWED_USER")
+
+DB_USER = os.getenv("DB_USER")
+DB_PASSWORD = os.getenv("DB_PASSWORD")
+DB_HOST = os.getenv("DB_HOST")
+DB_NAME = os.getenv("DB_NAME")
 
 logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
 
@@ -47,13 +50,25 @@ async def restricted(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await restricted(update, context): return
+    
+    with get_db_connection() as conn:
+        cursor = conn.cursor()
+        cursor.execute("SELECT SUM(amount) FROM transactions")
+        total = cursor.fetchone()[0] or 0
+        
+        cursor.execute("SELECT amount, comment FROM transactions ORDER BY id DESC LIMIT 5")
+        last_ops = cursor.fetchall()
+        cursor.close()
+
+    ops_text = "\n".join([f"*{row[0]:+.2f}* ({row[1]})" for row in last_ops])
+    
     keyboard = [
         [InlineKeyboardButton("Итого", callback_data="total")],
         [InlineKeyboardButton("История", callback_data="history_0")],
         [InlineKeyboardButton("Экспорт CSV", callback_data="export")]
     ]
     reply_markup = InlineKeyboardMarkup(keyboard)
-    await update.message.reply_text("Бот бухгалтерии готов.", reply_markup=reply_markup)
+    await update.message.reply_text(f"Бот бухгалтерии готов.\nБаланс: *{total:.2f}*\n\nПоследние операции:\n{ops_text}", reply_markup=reply_markup, parse_mode='Markdown')
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not await restricted(update, context): return
@@ -78,7 +93,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.close()
             conn.commit()
             
-        await update.message.reply_text(f"Записано: {amount} ({comment})", reply_markup=menu_markup)
+        await update.message.reply_text(f"Записано: *{amount}* ({comment})", reply_markup=menu_markup, parse_mode='Markdown')
     except ValueError:
         await update.message.reply_text("Неверный формат. Используйте: [сумма] [комментарий] или +[сумма] [комментарий]", reply_markup=menu_markup)
 
@@ -94,21 +109,24 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("SELECT SUM(amount) FROM transactions")
             total = cursor.fetchone()[0] or 0
             cursor.close()
-        await query.edit_message_text(text=f"Общий баланс: {total:.2f}", reply_markup=menu_markup)
+        await query.edit_message_text(text=f"Общий баланс: *{total:.2f}*", reply_markup=menu_markup, parse_mode='Markdown')
         
     elif query.data == "export":
         output = io.StringIO()
-        writer = csv.writer(output)
-        writer.writerow(["ID", "Date", "Amount", "Comment"])
+        writer = csv.writer(output, delimiter=';')
+        writer.writerow(["ID", "Date", "Amount", "Comment", "Sum"])
         
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT * FROM transactions")
+            cursor.execute("""
+                SELECT id, date, amount, comment, SUM(amount) OVER (ORDER BY id ASC) 
+                FROM transactions
+            """)
             writer.writerows(cursor.fetchall())
             cursor.close()
             
         output.seek(0)
-        await context.bot.send_document(chat_id=update.effective_chat.id, document=io.BytesIO(output.getvalue().encode()), filename="accounting.csv")
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=io.BytesIO(output.getvalue().encode("utf-8-sig")), filename="accounting.csv")
         await query.edit_message_text("Экспорт завершен.", reply_markup=menu_markup)
         
     elif query.data.startswith("history_"):
@@ -118,7 +136,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         with get_db_connection() as conn:
             cursor = conn.cursor()
-            cursor.execute("SELECT date, amount, comment FROM transactions ORDER BY id DESC LIMIT %s OFFSET %s", (limit, offset))
+            cursor.execute("""
+                WITH data AS (
+                    SELECT amount, comment, SUM(amount) OVER (ORDER BY id ASC) as rt, id 
+                    FROM transactions
+                )
+                SELECT rt, amount, comment FROM data ORDER BY id ASC LIMIT %s OFFSET %s
+            """, (limit, offset))
             rows = cursor.fetchall()
             cursor.execute("SELECT COUNT(*) FROM transactions")
             total_count = cursor.fetchone()[0]
@@ -126,7 +150,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         text = f"История (Страница {page + 1}):\n\n"
         for row in rows:
-            text += f"{row[0]} | {row[1]} | {row[2]}\n"
+            amount_fmt = f"+{row[1]}" if row[1] > 0 else f"{row[1]}"
+            text += f"*{row[0]:.2f}* | *{amount_fmt}* | {row[2]}\n"
             
         buttons = []
         if page > 0:
@@ -137,15 +162,26 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(InlineKeyboardButton("В меню", callback_data="menu"))
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
         
-        await query.edit_message_text(text=text, reply_markup=reply_markup)
+        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
 
     elif query.data == "menu":
+        with get_db_connection() as conn:
+            cursor = conn.cursor()
+            cursor.execute("SELECT SUM(amount) FROM transactions")
+            total = cursor.fetchone()[0] or 0
+            
+            cursor.execute("SELECT amount, comment FROM transactions ORDER BY id DESC LIMIT 5")
+            last_ops = cursor.fetchall()
+            cursor.close()
+
+        ops_text = "\n".join([f"*{row[0]:+.2f}* ({row[1]})" for row in last_ops])
+
         keyboard = [
             [InlineKeyboardButton("Итого", callback_data="total")],
             [InlineKeyboardButton("История", callback_data="history_0")],
             [InlineKeyboardButton("Экспорт CSV", callback_data="export")]
         ]
-        await query.edit_message_text("Бот бухгалтерии готов.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text(f"Бот бухгалтерии готов.\nБаланс: *{total:.2f}*\n\nПоследние операции:\n{ops_text}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 if __name__ == '__main__':
     init_db()
