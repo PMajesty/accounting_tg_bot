@@ -109,7 +109,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             cursor.execute("SELECT SUM(amount) FROM transactions")
             total = cursor.fetchone()[0] or 0
             cursor.close()
-        await query.edit_message_text(text=f"Общий баланс: *{total:.2f}*", reply_markup=menu_markup, parse_mode='Markdown')
+        
+        await query.message.delete()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Общий баланс: *{total:.2f}*", reply_markup=menu_markup, parse_mode='Markdown')
         
     elif query.data == "export":
         output = io.StringIO()
@@ -127,7 +129,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             
         output.seek(0)
         await context.bot.send_document(chat_id=update.effective_chat.id, document=io.BytesIO(output.getvalue().encode("utf-8-sig")), filename="accounting.csv")
-        await query.edit_message_text("Экспорт завершен.", reply_markup=menu_markup)
+        
+        await query.message.delete()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text="Экспорт завершен.", reply_markup=menu_markup)
         
     elif query.data.startswith("history_"):
         page = int(query.data.split("_")[1])
@@ -141,7 +145,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     SELECT amount, comment, SUM(amount) OVER (ORDER BY id ASC) as rt, id 
                     FROM transactions
                 )
-                SELECT rt, amount, comment FROM data ORDER BY id ASC LIMIT %s OFFSET %s
+                SELECT rt, amount, comment FROM data ORDER BY id DESC LIMIT %s OFFSET %s
             """, (limit, offset))
             rows = cursor.fetchall()
             cursor.execute("SELECT COUNT(*) FROM transactions")
@@ -162,7 +166,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         buttons.append(InlineKeyboardButton("В меню", callback_data="menu"))
         reply_markup = InlineKeyboardMarkup([buttons]) if buttons else None
         
-        await query.edit_message_text(text=text, reply_markup=reply_markup, parse_mode='Markdown')
+        await query.message.delete()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=text, reply_markup=reply_markup, parse_mode='Markdown')
 
     elif query.data == "menu":
         with get_db_connection() as conn:
@@ -181,7 +186,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("История", callback_data="history_0")],
             [InlineKeyboardButton("Экспорт CSV", callback_data="export")]
         ]
-        await query.edit_message_text(f"Бот бухгалтерии готов.\nБаланс: *{total:.2f}*\n\nПоследние операции:\n{ops_text}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
+        
+        await query.message.delete()
+        await context.bot.send_message(chat_id=update.effective_chat.id, text=f"Бот бухгалтерии готов.\nБаланс: *{total:.2f}*\n\nПоследние операции:\n{ops_text}", reply_markup=InlineKeyboardMarkup(keyboard), parse_mode='Markdown')
 
 if __name__ == '__main__':
     init_db()
